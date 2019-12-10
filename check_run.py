@@ -5,17 +5,21 @@ import logging
 import schedule
 from datetime import date, datetime
 from logging.handlers import TimedRotatingFileHandler
+import pandas as pd
 import re
 from request_api import RequestApi
 logger = logging.getLogger(__name__)
 
 
 class CheckRun(object):
-    def __init__(self, path, outpath):
+    def __init__(self, path, outpath, out_file, sample_sheet, sign):
         self.path = path
         self.diritems = []
         self.fastaitems = []
         self.filename = outpath
+        self.out_file = out_file
+        self.sample_sheet = sample_sheet
+        self.sign = sign
 
     # 根据给定的路径获取文件夹
     def get_dirs(self):
@@ -25,7 +29,6 @@ class CheckRun(object):
             list_dirs = os.listdir(self.path)
             for de in list_dirs:
                 item = {}
-
                 list_p = de.split("_")
                 if len(list_p) > 2:
                     list_r = list_p[1]
@@ -82,7 +85,6 @@ class CheckRun(object):
                     fastq_path = os.path.join(fastq_path, temp, 'Fastq')
                     fastq_list = os.listdir(fastq_path)
                     if len(fastq_list):
-
                         fastq_list = [faq for faq in fastq_list if faq.endswith("fastq.gz")]
                         fastq_list = sorted(fastq_list)
                         for fastq in fastq_list:
@@ -363,6 +365,32 @@ class CheckRun(object):
             request_data["run_seqs"] = items
             return request_data
 
+    # 对文件状态为1的runid寻找SampleSheet.csv文件读取文件中的sampleid并把与其对应的fastq文件写进输出文件中
+    def find_samplesheet(self, runid, fastq_path_list):
+        samplesheet_path = os.path.join(self.sample_sheet, runid, "SampleSheet.csv")
+        if os.path.exists(samplesheet_path):
+            flag = 0
+            f = open(self.out_file, 'w')
+            with open(samplesheet_path, 'r') as files:
+                for line in files:
+                    if line.startswith("Sample_ID,Sample_Name"):
+                        flag = 1
+                        continue
+                    if flag:
+                        sampleid = line.strip("\n").split(",")[1]
+                        if sampleid.endswith("ITS") or sampleid.endswith("V4M"):
+                            pass
+                        else:
+                            flas = 0
+                            for path in fastq_path_list:
+                                if path.split("/")[-1].split("_")[0] == sampleid:
+                                    flas = 1
+                                    f.write(sampleid + "," + path + "\n")
+                            if flas:
+                                logger.error(f"{sampleid}在{self.path}路径下找不到对应的fastq文件")
+        else:
+            logger.error(f"{runid}这条测序runid在{self.sample_sheet}路径下找不到SampleSheet.csv， 全路径为：{samplesheet_path}")
+
     # 对需要更新的状态的文件夹，发送更新api
     def get_find_fastq_dirs(self, list_dires):
         logger.debug("进入get_find_fastq_dirs方法")
@@ -379,6 +407,8 @@ class CheckRun(object):
                 item["run_info_id"] = int(adre["run_info_id"])
                 item["status"] = run_status
                 if run_status:
+                    if int(self.sign):
+                        self.find_samplesheet(adre["runid"], fastq_path_list)
                     # fastq_path_list = self.get_fastq_file(adre)
                     request_data = self.send_fastq_path(fastq_path_list, item)
                     upapi = RequestApi(request_data)
@@ -449,12 +479,12 @@ class CheckRun(object):
 
 
 class ScheduleRun(object):
-    def run(self, path, outpath):
-        checkr = CheckRun(path, outpath)
+    def run(self, path, outpath, out_file, sample_sheet, sign):
+        checkr = CheckRun(path, outpath, out_file, sample_sheet, sign)
         checkr.run()
 
-    def schedule_local(self, path, outpath, schedule_time):
-        schedule.every(int(schedule_time)).minutes.do(self.run, path, outpath)
+    def schedule_local(self, path, outpath, schedule_time, out_file, sample_sheet, sign):
+        schedule.every(int(schedule_time)).minutes.do(self.run, path, outpath, out_file, sample_sheet, sign)
         while True:
             schedule.run_pending()
             time.sleep(1)
@@ -463,6 +493,11 @@ class ScheduleRun(object):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Scan Illumina Runs and send status to Promegene BMS')
     parser.add_argument('-r', '--runpath', required=True, help='下机数据路径', default="/share/data4/illumina")
+    parser.add_argument('-o', '--out_file', default='/share/data5/hegh/project1/7.24/das_flow/sample_path.txt',
+                        help='输出文件中包含样品名和对应的fastq文件路径')
+    parser.add_argument('-m', '--sample_sheet', default='/share/data2/xujm/docker/test_pathogenic_smk/staging/',
+                        help='测序run中包含SampleSheet.csv文件')
+    parser.add_argument('-f', '--sign', default=1, help='需不需取生成输出文件')
     parser.add_argument('-s', '--scanlog', default='scan.log', help='扫描记录日志文件。默认为scan.log')
     parser.add_argument('-t', '--schedule_time', default='5', help='间隔多少分钟再运行脚本')
     parser.add_argument('-d', '--debug', action='store_true', default=False, help='是否打开调试模式。默认关闭')
@@ -477,7 +512,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s] p%(process)s {%(pathname)s:%(lineno)d} %(levelname)s - %(message)s',
                         handlers=[handler])
     schedule_hour = ScheduleRun()
-    schedule_hour.schedule_local(args.runpath, args.scanlog, args.schedule_time)
+    schedule_hour.schedule_local(args.runpath, args.scanlog, args.schedule_time, args.out_file, args.sample_sheet,args.sign)
     # schedule_hour.run(args.runpath, args.scanlog)
 
 
